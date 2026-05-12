@@ -1,0 +1,14 @@
+symbol: BTCUSDT
+interval: "5m"
+
+period:
+  start: "2025-12-18T00:00:00Z"
+  end:   "2026-05-07T23:59:59Z"
+
+cache_dir: "cache"
+
+sources:
+  - binance_futures      # USDT-M Futures klines (taker buy/sell volume)
+  - binance_spot         # Spot klines (для реконструкции исходов Polymarket)
+  - bybit_linear         # Bybit USDT Perp klines
+  - binance_aggtrades    # Futures aggTrades, агрегируем до 5m bucket
