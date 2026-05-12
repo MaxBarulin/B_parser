@@ -54,21 +54,34 @@ def _klines_download(
     cache_dir: str,
 ) -> None:
     path = storage.cache_path(cache_dir, source, symbol, interval)
-    cached_max = storage.cached_max_ts(path, "open_time")
     step = pd.Timedelta(interval)
+    cached = storage.load(path)
 
-    if cached_max is not None:
-        actual_start = max(start, cached_max + step)
+    # Plan: fetch the missing pieces both before cached_min and after cached_max.
+    if cached is None or cached.empty:
+        windows = [(start, end)]
+        cached_min = cached_max = None
     else:
-        actual_start = start
+        cached_min = cached["open_time"].min()
+        cached_max = cached["open_time"].max()
+        windows = []
+        if start < cached_min:
+            windows.append((start, cached_min - step))         # backfill earlier
+        if end > cached_max:
+            windows.append((cached_max + step, end))           # extend forward
 
-    if actual_start > end:
-        print(f"[{source}] cache up-to-date (max {cached_max})")
+    if not windows:
+        print(f"[{source}] cache up-to-date ({cached_min} -> {cached_max})")
         return
 
-    print(f"[{source}] fetching {actual_start} -> {end}")
-    df = fetcher(symbol, interval, actual_start, end)
-    merged = storage.merge_save(df, path, key="open_time")
+    for w_start, w_end in windows:
+        if w_start > w_end:
+            continue
+        print(f"[{source}] fetching {w_start} -> {w_end}")
+        df = fetcher(symbol, interval, w_start, w_end)
+        storage.merge_save(df, path, key="open_time")
+
+    merged = storage.load(path)
     rows = 0 if merged is None else len(merged)
     print(f"[{source}] cached rows: {rows} -> {path}")
 

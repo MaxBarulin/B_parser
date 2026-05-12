@@ -69,16 +69,20 @@ def fetch_klines(
 
     rows: list = []
     cursor = start_ms
+    # Bybit V5 returns the NEWEST `limit` candles within [start, end] in DESC
+    # order. If our period is wider than limit*step we'd only see the tail —
+    # so we cap each window to exactly MAX_LIMIT candles and page forward.
     while cursor <= end_ms:
-        batch = _fetch_batch(symbol, interval, cursor, end_ms, category)
+        window_end = min(cursor + (MAX_LIMIT - 1) * step_ms, end_ms)
+        batch = _fetch_batch(symbol, interval, cursor, window_end, category)
         if not batch:
-            break
-        batch.reverse()  # bybit returns DESC
+            # No data in this window (gap or maintenance); advance.
+            cursor = window_end + step_ms
+            continue
+        batch.reverse()  # DESC -> ASC
         rows.extend(batch)
         last_open = int(batch[-1][0])
         cursor = last_open + step_ms
-        if len(batch) < MAX_LIMIT:
-            break
 
     if not rows:
         return pd.DataFrame(columns=_COLS)
@@ -87,4 +91,6 @@ def fetch_klines(
     df["open_time"] = pd.to_datetime(df["open_time"].astype("int64"), unit="ms", utc=True)
     for c in _NUM_COLS:
         df[c] = pd.to_numeric(df[c])
+    # In case overlapping windows produced duplicates, drop them.
+    df = df.drop_duplicates(subset=["open_time"]).sort_values("open_time").reset_index(drop=True)
     return df
