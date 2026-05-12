@@ -128,6 +128,19 @@ def f_inv5_combo(s):
     return (c1.astype(int) + c2.astype(int) + c3.astype(int) + c4.astype(int)) >= 2
 
 
+def f_hour_night_msk(s):
+    """Пропуск если час МСК в 22-07 (азиатская сессия / ночь)."""
+    if "hour_msk" not in s.columns:
+        return pd.Series(False, index=s.index)
+    h = s["hour_msk"]
+    return ((h >= 22) | (h < 8)).fillna(False)
+
+
+def f_inv1_plus_night(s):
+    """Комбо: 'нет пробоя' + 'не вход в ночь МСК'."""
+    return f_inv1_no_breakout(s).fillna(False) | f_hour_night_msk(s).fillna(False)
+
+
 # (key, имя_для_отчёта, описание_на_русском, функция_пропуска)
 FILTERS = [
     ("baseline",         "Без фильтров",                "Все сигналы; ничего не пропускаем (база для сравнения).",                       lambda s: pd.Series(False, index=s.index)),
@@ -141,6 +154,8 @@ FILTERS = [
     ("inv_3_balanced",   "Инверт-3: баланс taker",      "Пропуск если taker близок к 50/50 (±5%) — нет агрессии ни в одну сторону.",     f_inv3_balanced_taker),
     ("inv_4_doji",       "Инверт-4: доджи",             "Пропуск если средний body/range у 3 свечей < 0.3 (свечи без направления).",     f_inv4_doji),
     ("inv_5_combo",      "Инверт-5: ≥2 из 4 (тихий)",   "Пропуск если выполнены ≥2 из 4 условий 'тихого рынка'.",                        f_inv5_combo),
+    ("hour_night_msk",   "Час: ночь МСК (22-07)",       "Пропуск если вход приходится на 22:00-07:59 МСК (низковолатильные часы).",     f_hour_night_msk),
+    ("inv1_plus_night",  "Комбо: Инверт-1 + ночь МСК",  "Пропуск если выполнен Инверт-1 ИЛИ вход ночью МСК.",                            f_inv1_plus_night),
 ]
 
 

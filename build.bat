@@ -52,7 +52,7 @@ if errorlevel 1 (
 REM --- Шаг 4: предполётная проверка что всё импортируется ---
 echo.
 echo Проверяю что все нужные пакеты импортируются из текущего Python...
-python -c "import pandas, yaml, tqdm, pyarrow, openpyxl, requests; print('  Все пакеты OK')"
+python -c "import pandas, yaml, tqdm, pyarrow, openpyxl, requests, matplotlib; print('  Все пакеты OK')"
 if errorlevel 1 (
   echo.
   echo [ОШИБКА] Какой-то пакет недоступен из текущего Python.
@@ -91,6 +91,8 @@ python -m PyInstaller ^
   --collect-all openpyxl ^
   --collect-all yaml ^
   --collect-all tqdm ^
+  --collect-all matplotlib ^
+  --hidden-import matplotlib.backends.backend_agg ^
   --hidden-import et_xmlfile ^
   --hidden-import requests ^
   --hidden-import urllib3 ^
