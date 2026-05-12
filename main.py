@@ -25,6 +25,7 @@ from data import (
 )
 from analysis import outcomes as outcomes_mod
 from analysis import series as series_mod
+from analysis import features as features_mod
 
 ALL_SOURCES = ["binance_futures", "binance_spot", "bybit_linear", "binance_aggtrades"]
 
@@ -188,7 +189,7 @@ def cmd_export(args, cfg) -> None:
         for src_dir in sorted(analysis_root.iterdir()):
             if not src_dir.is_dir():
                 continue
-            for kind in ("outcomes", "series", "signals"):
+            for kind in ("outcomes", "series", "signals", "long_series_context"):
                 p = src_dir / f"{kind}.parquet"
                 if p.exists():
                     _dump(f"analysis_{src_dir.name}_{kind}", pd.read_parquet(p))
@@ -215,11 +216,17 @@ def cmd_analyze(args, cfg) -> None:
         long_threshold=args.long_threshold,
     )
 
+    # Compute feature columns for each signal and a separate long-series table.
+    signals_with_features = features_mod.add_features(signals, klines)
+    long_ctx = features_mod.long_series_context(series, klines, threshold=args.long_threshold)
+
     out_dir = Path(cache_dir) / "analysis" / src
     out_dir.mkdir(parents=True, exist_ok=True)
     storage.save(outcomes, out_dir / "outcomes.parquet")
     storage.save(series, out_dir / "series.parquet")
-    storage.save(signals, out_dir / "signals.parquet")
+    storage.save(signals_with_features, out_dir / "signals.parquet")
+    if not long_ctx.empty:
+        storage.save(long_ctx, out_dir / "long_series_context.parquet")
 
     n_up = int((outcomes["outcome"] == "UP").sum())
     n_down = int((outcomes["outcome"] == "DOWN").sum())
@@ -231,13 +238,42 @@ def cmd_analyze(args, cfg) -> None:
     print(f"  signals  : total={stats['n_signals']}  wins={stats['n_wins']}  "
           f"losses={stats['n_losses']}  win_rate={stats['win_rate']:.1%}")
     if stats["n_signals"]:
-        loss_share = stats["n_losses"] / stats["n_signals"]
-        # expected value at fair odds (each win pays at 1:1 of cumulative martingale stake; loss eats it):
-        # this is just a quick sanity number — real backtest comes in step 4
         print(f"  long-series share of signals (>=7): "
               f"{int(signals['is_long_series'].sum())} ({signals['is_long_series'].mean():.1%})")
-        _ = loss_share  # silenced — real PnL in backtest step
+
+    # Compact "wins vs long-series losses" comparison over key features.
+    _print_feature_compare(signals_with_features)
     print(f"  saved    -> {out_dir}")
+
+
+def _print_feature_compare(sigs: pd.DataFrame) -> None:
+    wins = sigs[sigs["result"] == "win"]
+    longs = sigs[sigs["is_long_series"] == True]  # noqa: E712
+    if wins.empty or longs.empty:
+        return
+    cols = [
+        ("volume_ratio",            "vol ratio (3bar / 3x60m_avg)"),
+        ("range_expansion",         "range expansion"),
+        ("taker_with_series_ratio", "taker in series direction"),
+        ("body_to_range_3bar_avg",  "avg body/range"),
+        ("close_position_3bar_avg", "avg close position"),
+        ("breakout_60m_with_series","breakout 60m in series dir"),
+        ("breakout_3h_with_series", "breakout 3h in series dir"),
+        ("breakout_24h_with_series","breakout 24h in series dir"),
+        ("distance_from_ema20_pct", "dist from EMA20, %"),
+        ("distance_from_vwap_pct",  "dist from VWAP, %"),
+    ]
+    print(f"\n  Feature compare  (wins n={len(wins)}  vs  long-series losses n={len(longs)}):")
+    print(f"    {'feature':35s}  {'wins (mean)':>13s}  {'longs (mean)':>13s}  {'delta':>10s}")
+    for col, label in cols:
+        if col not in sigs.columns:
+            continue
+        w = wins[col].astype(float).mean()
+        l = longs[col].astype(float).mean()
+        if pd.isna(w) or pd.isna(l):
+            continue
+        delta = l - w
+        print(f"    {label:35s}  {w:>13.3f}  {l:>13.3f}  {delta:>+10.3f}")
 
 
 def cmd_status(_args, cfg) -> None:
