@@ -26,6 +26,7 @@ from data import (
 from analysis import outcomes as outcomes_mod
 from analysis import series as series_mod
 from analysis import features as features_mod
+from analysis import backtest as backtest_mod
 
 ALL_SOURCES = ["binance_futures", "binance_spot", "bybit_linear", "binance_aggtrades"]
 
@@ -233,18 +234,18 @@ def cmd_analyze(args, cfg) -> None:
     n_down = int((outcomes["outcome"] == "DOWN").sum())
     stats = series_mod.summarize(series, signals)
 
-    print(f"  outcomes : {len(outcomes)}  UP={n_up}  DOWN={n_down}  (UP rate {n_up/len(outcomes):.1%})")
-    print(f"  series   : total={stats['n_series']}  max_len={stats['max_series_len']}  "
-          f">=7: {stats['n_series_ge7']}  >=10: {stats['n_series_ge10']}")
-    print(f"  signals  : total={stats['n_signals']}  wins={stats['n_wins']}  "
-          f"losses={stats['n_losses']}  win_rate={stats['win_rate']:.1%}")
+    print(f"  Исходов     : {len(outcomes)}  UP={n_up}  DOWN={n_down}  (доля UP {n_up/len(outcomes):.1%})")
+    print(f"  Серий       : всего={stats['n_series']}  макс_длина={stats['max_series_len']}  "
+          f"≥7: {stats['n_series_ge7']}  ≥10: {stats['n_series_ge10']}")
+    print(f"  Сигналов    : всего={stats['n_signals']}  побед={stats['n_wins']}  "
+          f"проигрышей={stats['n_losses']}  win_rate={stats['win_rate']:.1%}")
     if stats["n_signals"]:
-        print(f"  long-series share of signals (>=7): "
+        print(f"  Доля длинных серий в сигналах (≥7): "
               f"{int(signals['is_long_series'].sum())} ({signals['is_long_series'].mean():.1%})")
 
-    # Compact "wins vs long-series losses" comparison over key features.
+    # Сравнение wins vs длинные-серии-losses по ключевым признакам.
     _print_feature_compare(signals_with_features)
-    print(f"  saved    -> {out_dir}")
+    print(f"  Сохранено  -> {out_dir}")
 
 
 def _print_feature_compare(sigs: pd.DataFrame) -> None:
@@ -253,19 +254,19 @@ def _print_feature_compare(sigs: pd.DataFrame) -> None:
     if wins.empty or longs.empty:
         return
     cols = [
-        ("volume_ratio",            "vol ratio (3bar / 3x60m_avg)"),
-        ("range_expansion",         "range expansion"),
-        ("taker_with_series_ratio", "taker in series direction"),
-        ("body_to_range_3bar_avg",  "avg body/range"),
-        ("close_position_3bar_avg", "avg close position"),
-        ("breakout_60m_with_series","breakout 60m in series dir"),
-        ("breakout_3h_with_series", "breakout 3h in series dir"),
-        ("breakout_24h_with_series","breakout 24h in series dir"),
-        ("distance_from_ema20_pct", "dist from EMA20, %"),
-        ("distance_from_vwap_pct",  "dist from VWAP, %"),
+        ("volume_ratio",            "объём 3 свечей / 3x среднее за час"),
+        ("range_expansion",         "расширение диапазона (3 свечи / 60м)"),
+        ("taker_with_series_ratio", "taker в направлении серии"),
+        ("body_to_range_3bar_avg",  "среднее body/range (3 свечи)"),
+        ("close_position_3bar_avg", "среднее положение close в свече"),
+        ("breakout_60m_with_series","пробой 60м в направлении серии"),
+        ("breakout_3h_with_series", "пробой 3ч в направлении серии"),
+        ("breakout_24h_with_series","пробой 24ч в направлении серии"),
+        ("distance_from_ema20_pct", "расстояние от EMA20, %"),
+        ("distance_from_vwap_pct",  "расстояние от VWAP, %"),
     ]
-    print(f"\n  Feature compare  (wins n={len(wins)}  vs  long-series losses n={len(longs)}):")
-    print(f"    {'feature':35s}  {'wins (mean)':>13s}  {'longs (mean)':>13s}  {'delta':>10s}")
+    print(f"\n  Сравнение по признакам  (победы n={len(wins)}  vs  длинные серии n={len(longs)}):")
+    print(f"    {'признак':40s}  {'победы':>10s}  {'длинные':>10s}  {'разница':>10s}")
     for col, label in cols:
         if col not in sigs.columns:
             continue
@@ -274,7 +275,113 @@ def _print_feature_compare(sigs: pd.DataFrame) -> None:
         if pd.isna(w) or pd.isna(l):
             continue
         delta = l - w
-        print(f"    {label:35s}  {w:>13.3f}  {l:>13.3f}  {delta:>+10.3f}")
+        print(f"    {label:40s}  {w:>10.3f}  {l:>10.3f}  {delta:>+10.3f}")
+
+
+def cmd_backtest(args, cfg) -> None:
+    symbol = cfg["symbol"]
+    interval = cfg["interval"]
+    cache_dir = cfg["cache_dir"]
+
+    src = args.source
+    sigs_path = Path(cache_dir) / "analysis" / src / "signals.parquet"
+    if not sigs_path.exists():
+        print(f"[backtest] нет сигналов для {src}. Сначала прогон 'Анализ'.")
+        return
+    sigs = pd.read_parquet(sigs_path)
+
+    cfg_bt = backtest_mod.BacktestConfig(
+        payout=args.payout,
+        base_stake=args.base_stake,
+        max_attempts=args.max_attempts,
+        stake_mode=args.stake_mode,
+    )
+    stakes = backtest_mod._stakes(cfg_bt)
+    cumloss = sum(stakes)
+
+    print(f"\n[backtest] источник={src}")
+    print(f"  Параметры стратегии:")
+    print(f"    выплата (payout)   : {cfg_bt.payout}x")
+    print(f"    догон              : {cfg_bt.max_attempts} ставки")
+    print(f"    ставки             : {stakes}  (режим: {cfg_bt.stake_mode})")
+    print(f"    проигрыш всей цепи : -{cumloss}")
+    print(f"    train_end          : {args.train_end}")
+
+    results = backtest_mod.run_full_backtest(sigs, cfg_bt, train_end=args.train_end)
+
+    out_dir = Path(cache_dir) / "analysis" / src
+    storage.save(results, out_dir / "backtest_results.parquet")
+
+    # Печатаем компактную таблицу по периоду 'весь_период'
+    print("\n  Результаты (весь период, 18.12.2025 — 07.05.2026):")
+    _print_backtest_table(results[results["период"] == "весь_период"])
+
+    print("\n  Walk-forward train (18.12.2025 — 31.03.2026):")
+    _print_backtest_table(results[results["период"] == "train"])
+
+    print("\n  Walk-forward test  (01.04.2026 — 07.05.2026):")
+    _print_backtest_table(results[results["период"] == "test"])
+
+    # Выгрузка многолистового отчёта прямо отсюда
+    out_xlsx = Path(args.out) / f"backtest_filters_report_{src}.xlsx"
+    out_xlsx.parent.mkdir(parents=True, exist_ok=True)
+    _write_backtest_excel(results, out_xlsx, cfg_bt, stakes, args.train_end)
+    print(f"\n  Отчёт   -> {out_xlsx}")
+    print(f"  Кэш     -> {out_dir / 'backtest_results.parquet'}")
+
+
+def _print_backtest_table(df: pd.DataFrame) -> None:
+    if df.empty:
+        print("    (пусто)")
+        return
+    print(f"    {'стратегия':30s} {'сигн':>5s} {'проп':>5s} {'осн':>5s} "
+          f"{'побед':>6s} {'пр-ш':>5s} {'win_%':>6s} {'PnL':>9s} {'PnL/сигн':>10s} {'DD':>9s}")
+    # Сортируем по PnL по убыванию, чтобы лучшие сверху
+    for _, r in df.sort_values("PnL_всего", ascending=False).iterrows():
+        print(f"    {r['стратегия']:30s} {int(r['сигналов_всего']):>5d} "
+              f"{int(r['пропущено']):>5d} {int(r['осталось']):>5d} "
+              f"{int(r['побед']):>6d} {int(r['проигрышей']):>5d} "
+              f"{r['win_rate_%']:>6.1f} {r['PnL_всего']:>+9.2f} "
+              f"{r['PnL_на_сигнал']:>+10.3f} {r['max_drawdown']:>+9.2f}")
+
+
+def _write_backtest_excel(results: pd.DataFrame, path: Path, cfg, stakes, train_end: str) -> None:
+    """Многолистовой xlsx-отчёт по бэктесту для заказчика."""
+    with pd.ExcelWriter(path, engine="openpyxl") as writer:
+        # Лист 1: Сводка — все стратегии × все периоды
+        summary = results[[
+            "стратегия", "период", "сигналов_всего", "пропущено", "осталось",
+            "побед", "проигрышей", "win_rate_%", "PnL_всего", "PnL_на_сигнал", "max_drawdown",
+        ]].copy()
+        summary.to_excel(writer, sheet_name="Сводка", index=False)
+
+        # Лист 2: Описание фильтров
+        descriptions = (
+            results[["стратегия_код", "стратегия", "описание"]]
+            .drop_duplicates(subset=["стратегия_код"])
+            .reset_index(drop=True)
+        )
+        descriptions.to_excel(writer, sheet_name="Описание_фильтров", index=False)
+
+        # Лист 3: Параметры стратегии и интерпретация
+        params = pd.DataFrame([
+            ["Выплата (payout)",            f"{cfg.payout}x"],
+            ["Догон (макс. ставок)",        cfg.max_attempts],
+            ["Базовая ставка",              cfg.base_stake],
+            ["Режим ставок",                cfg.stake_mode],
+            ["Ставки по шагам",             ", ".join(f"{s:g}" for s in stakes)],
+            ["Сумма проигрыша всей цепи",   -sum(stakes)],
+            ["Граница train/test",          train_end],
+            ["",                            ""],
+            ["Что показывает Сводка",       "Одна строка = одна стратегия × один период."],
+            ["Колонка 'пропущено'",         "Сколько сигналов отбросил фильтр."],
+            ["Колонка 'осталось'",          "Сигналы, по которым ставили."],
+            ["Колонка 'win_rate_%'",        "Процент побед среди оставшихся сигналов."],
+            ["Колонка 'PnL_всего'",         "Сумма прибыли/убытка в единицах базовой ставки."],
+            ["Колонка 'PnL_на_сигнал'",     "PnL_всего / число оставшихся сигналов."],
+            ["Колонка 'max_drawdown'",      "Максимальная просадка эквити (отрицательное число)."],
+        ], columns=["параметр", "значение"])
+        params.to_excel(writer, sheet_name="Параметры", index=False)
 
 
 def cmd_status(_args, cfg) -> None:
@@ -356,6 +463,22 @@ def main() -> None:
         help="Series length considered 'long' to flag (default: 7)",
     )
     p_an.set_defaults(func=cmd_analyze)
+
+    p_bt = sub.add_parser("backtest", help="Прогнать бэктест мартингейла с фильтрами")
+    p_bt.add_argument("--source", default="binance_spot",
+                      choices=["binance_spot", "binance_futures", "bybit_linear"])
+    p_bt.add_argument("--payout", type=float, default=1.8,
+                      help="Множитель выплаты Polymarket (по дефолту 1.8)")
+    p_bt.add_argument("--base-stake", type=float, default=1.0)
+    p_bt.add_argument("--max-attempts", type=int, default=3,
+                      help="Сколько ставок-догонов после тройки (по дефолту 3)")
+    p_bt.add_argument("--stake-mode", default="doubling",
+                      choices=["doubling", "fixed"])
+    p_bt.add_argument("--train-end", default="2026-03-31T23:59:59Z",
+                      help="Граница train/test для walk-forward")
+    p_bt.add_argument("--out", default="export",
+                      help="Куда положить Excel-отчёт")
+    p_bt.set_defaults(func=cmd_backtest)
 
     def _cmd_tui(_args, _cfg):
         from tui import run as tui_run
