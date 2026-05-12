@@ -85,6 +85,7 @@ python -m PyInstaller ^
   --console ^
   --noconfirm ^
   --clean ^
+  --add-data "config.yaml;." ^
   --collect-all pyarrow ^
   --collect-all pandas ^
   --collect-all openpyxl ^

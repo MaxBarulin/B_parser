@@ -32,14 +32,20 @@ ALL_SOURCES = ["binance_futures", "binance_spot", "bybit_linear", "binance_aggtr
 
 
 def load_config(path: str = "config.yaml") -> dict:
-    p = Path(path)
-    if not p.exists() and getattr(sys, "frozen", False):
-        # Running from a PyInstaller bundle: try alongside the .exe.
-        alt = Path(sys.executable).parent / path
-        if alt.exists():
-            p = alt
-    with open(p) as f:
-        return yaml.safe_load(f)
+    # Mirror tui._load_cfg: cwd -> next to .exe -> bundled in .exe (fallback).
+    candidates = [Path(path)]
+    if getattr(sys, "frozen", False):
+        candidates.append(Path(sys.executable).parent / path)
+        meipass = getattr(sys, "_MEIPASS", None)
+        if meipass:
+            candidates.append(Path(meipass) / path)
+    for p in candidates:
+        if p.exists():
+            with open(p, encoding="utf-8") as f:
+                return yaml.safe_load(f)
+    raise FileNotFoundError(
+        f"config.yaml не найден. Искал: {[str(c) for c in candidates]}"
+    )
 
 
 def parse_ts(s: str) -> pd.Timestamp:
