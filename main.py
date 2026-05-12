@@ -10,6 +10,7 @@ Sources: binance_futures, binance_spot, bybit_linear, binance_aggtrades, all
 from __future__ import annotations
 
 import argparse
+import sys
 from pathlib import Path
 
 import pandas as pd
@@ -29,7 +30,13 @@ ALL_SOURCES = ["binance_futures", "binance_spot", "bybit_linear", "binance_aggtr
 
 
 def load_config(path: str = "config.yaml") -> dict:
-    with open(path) as f:
+    p = Path(path)
+    if not p.exists() and getattr(sys, "frozen", False):
+        # Running from a PyInstaller bundle: try alongside the .exe.
+        alt = Path(sys.executable).parent / path
+        if alt.exists():
+            p = alt
+    with open(p) as f:
         return yaml.safe_load(f)
 
 
@@ -242,6 +249,13 @@ def cmd_status(_args, cfg) -> None:
 
 
 def main() -> None:
+    # No arguments at all -> launch the interactive TUI. This is the
+    # entry-point most non-developer users (and the PyInstaller .exe) will hit.
+    if len(sys.argv) == 1:
+        from tui import run as tui_run
+        tui_run()
+        return
+
     cfg = load_config()
     parser = argparse.ArgumentParser(prog="b_parser")
     sub = parser.add_subparsers(dest="cmd", required=True)
@@ -292,6 +306,13 @@ def main() -> None:
         help="Series length considered 'long' to flag (default: 7)",
     )
     p_an.set_defaults(func=cmd_analyze)
+
+    def _cmd_tui(_args, _cfg):
+        from tui import run as tui_run
+        tui_run()
+
+    p_tui = sub.add_parser("tui", help="Launch interactive menu")
+    p_tui.set_defaults(func=_cmd_tui)
 
     args = parser.parse_args()
     args.func(args, cfg)

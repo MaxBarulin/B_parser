@@ -1,3 +1,12 @@
+# Project-local runtime data
+cache/
+logs/
+export/
+B_parser_logs_*.zip
+
+# PyInstaller artefacts
+*.spec
+
 # Byte-compiled / optimized / DLL files
 __pycache__/
 *.py[codz]
