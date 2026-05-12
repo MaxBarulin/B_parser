@@ -88,7 +88,7 @@ def aggregate_5m(df: pd.DataFrame) -> pd.DataFrame:
 
 def fetch_day_5m(symbol: str, day: date) -> pd.DataFrame:
     """Download one daily aggTrades zip and return 5-min aggregate."""
-    content = get_bytes(_url(symbol, day))
+    content = get_bytes(_url(symbol, day), desc=f"{symbol} {day}")
     raw = _read_zip(content)
     return aggregate_5m(raw)
 

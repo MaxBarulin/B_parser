@@ -14,7 +14,6 @@ from pathlib import Path
 
 import pandas as pd
 import yaml
-from tqdm import tqdm
 
 from data import (
     binance_aggtrades,
@@ -73,16 +72,24 @@ def _aggtrades_download(
 ) -> None:
     source = "binance_aggtrades_5m"
     days = list(binance_aggtrades.daterange(start, end))
-    for day in tqdm(days, desc=f"[{source}]"):
+    total = len(days)
+    done = skipped = failed = 0
+    for i, day in enumerate(days, 1):
         out = storage.daily_cache_path(cache_dir, source, symbol, day.isoformat())
         if out.exists():
+            skipped += 1
             continue
+        print(f"[{source}] {i}/{total}  {day}  downloading...", flush=True)
         try:
             agg = binance_aggtrades.fetch_day_5m(symbol, day)
         except Exception as e:  # noqa: BLE001
+            failed += 1
             print(f"[{source}] {day} FAILED: {e}")
             continue
         storage.save(agg, out)
+        done += 1
+        print(f"[{source}] {i}/{total}  {day}  ok ({len(agg)} buckets)", flush=True)
+    print(f"[{source}] summary: done={done} skipped(cached)={skipped} failed={failed}")
 
 
 def cmd_download(args, cfg) -> None:
