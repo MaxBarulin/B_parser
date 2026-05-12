@@ -22,6 +22,8 @@ from data import (
     bybit,
     storage,
 )
+from analysis import outcomes as outcomes_mod
+from analysis import series as series_mod
 
 ALL_SOURCES = ["binance_futures", "binance_spot", "bybit_linear", "binance_aggtrades"]
 
@@ -160,6 +162,63 @@ def cmd_export(args, cfg) -> None:
 
     _dump(f"binance_aggtrades_5m_{symbol}", _concat_aggtrades(cache_dir, symbol))
 
+    # analysis artefacts (one set per source)
+    analysis_root = Path(cache_dir) / "analysis"
+    if analysis_root.exists():
+        for src_dir in sorted(analysis_root.iterdir()):
+            if not src_dir.is_dir():
+                continue
+            for kind in ("outcomes", "series", "signals"):
+                p = src_dir / f"{kind}.parquet"
+                if p.exists():
+                    _dump(f"analysis_{src_dir.name}_{kind}", pd.read_parquet(p))
+
+
+def cmd_analyze(args, cfg) -> None:
+    symbol = cfg["symbol"]
+    interval = cfg["interval"]
+    cache_dir = cfg["cache_dir"]
+    src = args.source
+
+    p = storage.cache_path(cache_dir, src, symbol, interval)
+    klines = storage.load(p)
+    if klines is None or klines.empty:
+        print(f"[analyze] no cached klines for {src}; run `download` first")
+        return
+
+    print(f"[analyze] source={src} rule={args.outcome_rule} max_attempts={args.max_attempts}")
+    outcomes = outcomes_mod.reconstruct(klines, rule=args.outcome_rule)
+    series = series_mod.detect_series(outcomes)
+    signals = series_mod.generate_signals(
+        outcomes,
+        max_attempts=args.max_attempts,
+        long_threshold=args.long_threshold,
+    )
+
+    out_dir = Path(cache_dir) / "analysis" / src
+    out_dir.mkdir(parents=True, exist_ok=True)
+    storage.save(outcomes, out_dir / "outcomes.parquet")
+    storage.save(series, out_dir / "series.parquet")
+    storage.save(signals, out_dir / "signals.parquet")
+
+    n_up = int((outcomes["outcome"] == "UP").sum())
+    n_down = int((outcomes["outcome"] == "DOWN").sum())
+    stats = series_mod.summarize(series, signals)
+
+    print(f"  outcomes : {len(outcomes)}  UP={n_up}  DOWN={n_down}  (UP rate {n_up/len(outcomes):.1%})")
+    print(f"  series   : total={stats['n_series']}  max_len={stats['max_series_len']}  "
+          f">=7: {stats['n_series_ge7']}  >=10: {stats['n_series_ge10']}")
+    print(f"  signals  : total={stats['n_signals']}  wins={stats['n_wins']}  "
+          f"losses={stats['n_losses']}  win_rate={stats['win_rate']:.1%}")
+    if stats["n_signals"]:
+        loss_share = stats["n_losses"] / stats["n_signals"]
+        # expected value at fair odds (each win pays at 1:1 of cumulative martingale stake; loss eats it):
+        # this is just a quick sanity number — real backtest comes in step 4
+        print(f"  long-series share of signals (>=7): "
+              f"{int(signals['is_long_series'].sum())} ({signals['is_long_series'].mean():.1%})")
+        _ = loss_share  # silenced — real PnL in backtest step
+    print(f"  saved    -> {out_dir}")
+
 
 def cmd_status(_args, cfg) -> None:
     symbol = cfg["symbol"]
@@ -213,6 +272,26 @@ def main() -> None:
         help="CSV separator (default: ';' for RU Excel; use ',' for international)",
     )
     p_ex.set_defaults(func=cmd_export)
+
+    p_an = sub.add_parser("analyze", help="Reconstruct UP/DOWN, detect series, label martingale signals")
+    p_an.add_argument(
+        "--source", default="binance_spot",
+        choices=["binance_spot", "binance_futures", "bybit_linear"],
+        help="Klines source to use (default: binance_spot, closest to Polymarket resolution)",
+    )
+    p_an.add_argument(
+        "--outcome-rule", default="candle", choices=["candle", "close_diff"],
+        help="'candle' = close>open in same bar; 'close_diff' = close[t]>close[t-1]",
+    )
+    p_an.add_argument(
+        "--max-attempts", type=int, default=3,
+        help="Number of martingale bets after the 3-in-a-row trigger (default: 3)",
+    )
+    p_an.add_argument(
+        "--long-threshold", type=int, default=7,
+        help="Series length considered 'long' to flag (default: 7)",
+    )
+    p_an.set_defaults(func=cmd_analyze)
 
     args = parser.parse_args()
     args.func(args, cfg)
