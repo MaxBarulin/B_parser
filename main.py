@@ -115,6 +115,52 @@ def cmd_download(args, cfg) -> None:
         _aggtrades_download(symbol, start, end, cache_dir)
 
 
+def _concat_aggtrades(cache_dir: str, symbol: str) -> pd.DataFrame | None:
+    agg_dir = Path(cache_dir) / "binance_aggtrades_5m" / symbol
+    if not agg_dir.exists():
+        return None
+    files = sorted(agg_dir.glob("*.parquet"))
+    if not files:
+        return None
+    parts = [pd.read_parquet(f) for f in files]
+    return pd.concat(parts, ignore_index=True).sort_values("bucket").reset_index(drop=True)
+
+
+def _write_excel(df: pd.DataFrame, path: Path) -> None:
+    """Excel cannot store tz-aware timestamps; strip tz (data is UTC, document it)."""
+    df = df.copy()
+    for col in df.select_dtypes(include=["datetimetz"]).columns:
+        df[col] = df[col].dt.tz_convert("UTC").dt.tz_localize(None)
+    df.to_excel(path, index=False, engine="openpyxl")
+
+
+def cmd_export(args, cfg) -> None:
+    symbol = cfg["symbol"]
+    interval = cfg["interval"]
+    cache_dir = cfg["cache_dir"]
+    out_dir = Path(args.out)
+    out_dir.mkdir(parents=True, exist_ok=True)
+    fmt = args.format  # 'xlsx' or 'csv'
+
+    def _dump(name: str, df: pd.DataFrame | None) -> None:
+        if df is None or df.empty:
+            print(f"[export] {name}: empty, skipped")
+            return
+        ext = "xlsx" if fmt == "xlsx" else "csv"
+        out = out_dir / f"{name}.{ext}"
+        if fmt == "xlsx":
+            _write_excel(df, out)
+        else:
+            df.to_csv(out, index=False, sep=args.csv_sep)
+        print(f"[export] {name}: {len(df)} rows -> {out}")
+
+    for src in ["binance_futures", "binance_spot", "bybit_linear"]:
+        p = storage.cache_path(cache_dir, src, symbol, interval)
+        _dump(f"{src}_{symbol}_{interval}", storage.load(p))
+
+    _dump(f"binance_aggtrades_5m_{symbol}", _concat_aggtrades(cache_dir, symbol))
+
+
 def cmd_status(_args, cfg) -> None:
     symbol = cfg["symbol"]
     interval = cfg["interval"]
@@ -155,6 +201,18 @@ def main() -> None:
 
     p_st = sub.add_parser("status", help="Show cached ranges per source")
     p_st.set_defaults(func=cmd_status)
+
+    p_ex = sub.add_parser("export", help="Export cache to Excel/CSV")
+    p_ex.add_argument("--out", default="export", help="Output directory (default: ./export)")
+    p_ex.add_argument(
+        "--format", default="xlsx", choices=["xlsx", "csv"],
+        help="Output format (default: xlsx)",
+    )
+    p_ex.add_argument(
+        "--csv-sep", default=";",
+        help="CSV separator (default: ';' for RU Excel; use ',' for international)",
+    )
+    p_ex.set_defaults(func=cmd_export)
 
     args = parser.parse_args()
     args.func(args, cfg)
