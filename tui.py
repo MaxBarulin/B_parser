@@ -87,14 +87,22 @@ def _menu(title: str, options: list[tuple[str, object]]) -> object:
 
 def _load_cfg():
     import yaml
-    cfg_path = Path("config.yaml")
-    if not cfg_path.exists() and getattr(sys, "frozen", False):
-        # When packed by PyInstaller, also look beside the .exe
-        alt = Path(sys.executable).parent / "config.yaml"
-        if alt.exists():
-            cfg_path = alt
-    with open(cfg_path) as f:
-        return yaml.safe_load(f)
+    # Look in: 1) current dir, 2) next to the exe (release folder),
+    #          3) bundled inside the PyInstaller .exe (fallback default).
+    candidates = [Path("config.yaml")]
+    if getattr(sys, "frozen", False):
+        candidates.append(Path(sys.executable).parent / "config.yaml")
+        meipass = getattr(sys, "_MEIPASS", None)
+        if meipass:
+            candidates.append(Path(meipass) / "config.yaml")
+    for p in candidates:
+        if p.exists():
+            with open(p, encoding="utf-8") as f:
+                return yaml.safe_load(f)
+    raise FileNotFoundError(
+        "config.yaml не найден. Положи его рядом с .exe (или в текущую папку). "
+        f"Искал: {[str(c) for c in candidates]}"
+    )
 
 
 def run() -> None:
