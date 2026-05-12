@@ -110,6 +110,7 @@ def run() -> None:
         ("Скачать данные (klines + aggTrades)", "download"),
         ("Что лежит в кэше", "status"),
         ("Прогнать анализ (UP/DOWN + серии + сигналы)", "analyze"),
+        ("Прогнать бэктест (стратегия + фильтры)", "backtest"),
         ("Выгрузить всё в Excel", "export"),
         ("Проверить связь с биржами", "ping"),
         ("Упаковать логи в ZIP для разработчика", "package"),
@@ -140,6 +141,8 @@ def _dispatch(action: str, cfg: dict) -> None:
         _do_status(cfg)
     elif action == "analyze":
         _do_analyze(cfg)
+    elif action == "backtest":
+        _do_backtest(cfg)
     elif action == "export":
         _do_export(cfg)
     elif action == "ping":
@@ -196,6 +199,38 @@ def _do_analyze(cfg: dict) -> None:
         "long_threshold": long_threshold,
     })()
     M.cmd_analyze(args, cfg)
+
+
+def _do_backtest(cfg: dict) -> None:
+    import main as M
+    src = _menu("Какой источник сигналов?", [
+        ("binance_spot (рекомендую)", "binance_spot"),
+        ("binance_futures", "binance_futures"),
+        ("bybit_linear", "bybit_linear"),
+    ])
+    if src is None:
+        return
+    payout_s = _ask("Множитель выплаты Polymarket (например 1.8)", "1.8")
+    stake_s = _ask("Базовая ставка (например 1)", "1")
+    attempts = _ask_int("Сколько ставок-догонов после тройки", 3)
+    mode = _menu("Режим ставок", [
+        ("Удвоение (1, 2, 4 ...) — классический мартингейл", "doubling"),
+        ("Фиксированная ставка (без удвоения)", "fixed"),
+    ])
+    if mode is None:
+        return
+    train_end = _ask("Граница train/test (UTC)", "2026-03-31T23:59:59Z")
+    out = _ask("Папка для xlsx-отчёта", "export")
+    args = type("A", (), {
+        "source": src,
+        "payout": float(payout_s),
+        "base_stake": float(stake_s),
+        "max_attempts": attempts,
+        "stake_mode": mode,
+        "train_end": train_end,
+        "out": out,
+    })()
+    M.cmd_backtest(args, cfg)
 
 
 def _do_export(cfg: dict) -> None:
