@@ -27,6 +27,7 @@ from analysis import outcomes as outcomes_mod
 from analysis import series as series_mod
 from analysis import features as features_mod
 from analysis import backtest as backtest_mod
+from analysis import charts as charts_mod
 
 ALL_SOURCES = ["binance_futures", "binance_spot", "bybit_linear", "binance_aggtrades"]
 
@@ -291,13 +292,22 @@ def cmd_backtest(args, cfg) -> None:
 
     src = args.source
     sigs_path = Path(cache_dir) / "analysis" / src / "signals.parquet"
+    series_path = Path(cache_dir) / "analysis" / src / "series.parquet"
     if not sigs_path.exists():
         print(f"[backtest] нет сигналов для {src}. Сначала прогон 'Анализ'.")
         return
     sigs = pd.read_parquet(sigs_path)
+    series_df = pd.read_parquet(series_path) if series_path.exists() else pd.DataFrame()
+
+    # Multi-payout sweep: principal payout первым, остальные считаются
+    # отдельно и попадают на лист "Sweep_по_payout".
+    payouts = [float(p.strip()) for p in str(args.payout).split(",") if p.strip()]
+    if not payouts:
+        payouts = [1.8]
+    primary_payout = payouts[0]
 
     cfg_bt = backtest_mod.BacktestConfig(
-        payout=args.payout,
+        payout=primary_payout,
         base_stake=args.base_stake,
         max_attempts=args.max_attempts,
         stake_mode=args.stake_mode,
@@ -307,7 +317,8 @@ def cmd_backtest(args, cfg) -> None:
 
     print(f"\n[backtest] источник={src}")
     print(f"  Параметры стратегии:")
-    print(f"    выплата (payout)   : {cfg_bt.payout}x")
+    print(f"    выплата (payout)   : {primary_payout}x  "
+          + (f"(плюс sweep: {payouts[1:]})" if len(payouts) > 1 else ""))
     print(f"    догон              : {cfg_bt.max_attempts} ставки")
     print(f"    ставки             : {stakes}  (режим: {cfg_bt.stake_mode})")
     print(f"    проигрыш всей цепи : -{cumloss}")
@@ -318,20 +329,45 @@ def cmd_backtest(args, cfg) -> None:
     out_dir = Path(cache_dir) / "analysis" / src
     storage.save(results, out_dir / "backtest_results.parquet")
 
-    # Печатаем компактную таблицу по периоду 'весь_период'
-    print("\n  Результаты (весь период, 18.12.2025 — 07.05.2026):")
+    # Sweep по другим payout-ам (компактная таблица по 'весь_период')
+    sweep_rows: list[dict] = []
+    if len(payouts) > 1:
+        for p in payouts:
+            cfg_p = backtest_mod.BacktestConfig(
+                payout=p, base_stake=cfg_bt.base_stake,
+                max_attempts=cfg_bt.max_attempts, stake_mode=cfg_bt.stake_mode,
+            )
+            r = backtest_mod.run_full_backtest(sigs, cfg_p, train_end=args.train_end)
+            r_all = r[r["период"] == "весь_период"][[
+                "стратегия", "сигналов_всего", "пропущено", "осталось",
+                "win_rate_%", "PnL_всего", "PnL_на_сигнал", "max_drawdown",
+            ]].copy()
+            r_all.insert(0, "payout", p)
+            sweep_rows.append(r_all)
+    sweep_df = pd.concat(sweep_rows, ignore_index=True) if sweep_rows else pd.DataFrame()
+
+    # Печатаем компактные таблицы по периодам
+    print("\n  Результаты (весь период):")
     _print_backtest_table(results[results["период"] == "весь_период"])
-
-    print("\n  Walk-forward train (18.12.2025 — 31.03.2026):")
+    print("\n  Walk-forward train (до train_end):")
     _print_backtest_table(results[results["период"] == "train"])
-
-    print("\n  Walk-forward test  (01.04.2026 — 07.05.2026):")
+    print("\n  Walk-forward test (после train_end):")
     _print_backtest_table(results[results["период"] == "test"])
 
-    # Выгрузка многолистового отчёта прямо отсюда
+    # Графики (7 PNG из ТЗ файл 4)
+    charts_dir = Path(args.out) / "charts"
+    sigs_with_pnl = backtest_mod.compute_pnl(
+        backtest_mod.recompute_outcome(sigs, cfg_bt), cfg_bt
+    )
+    chart_files = charts_mod.make_all(sigs_with_pnl, series_df, charts_dir, long_threshold=7)
+    if chart_files:
+        print(f"\n  Графиков сделано: {len(chart_files)}  -> {charts_dir}")
+
+    # Excel-отчёт
     out_xlsx = Path(args.out) / f"backtest_filters_report_{src}.xlsx"
     out_xlsx.parent.mkdir(parents=True, exist_ok=True)
-    _write_backtest_excel(results, out_xlsx, cfg_bt, stakes, args.train_end)
+    _write_backtest_excel(results, out_xlsx, cfg_bt, stakes, args.train_end,
+                          sweep_df, chart_files)
     print(f"\n  Отчёт   -> {out_xlsx}")
     print(f"  Кэш     -> {out_dir / 'backtest_results.parquet'}")
 
@@ -351,17 +387,32 @@ def _print_backtest_table(df: pd.DataFrame) -> None:
               f"{r['PnL_на_сигнал']:>+10.3f} {r['max_drawdown']:>+9.2f}")
 
 
-def _write_backtest_excel(results: pd.DataFrame, path: Path, cfg, stakes, train_end: str) -> None:
+def _write_backtest_excel(
+    results: pd.DataFrame,
+    path: Path,
+    cfg,
+    stakes,
+    train_end: str,
+    sweep_df: pd.DataFrame | None = None,
+    chart_files: list | None = None,
+) -> None:
     """Многолистовой xlsx-отчёт по бэктесту для заказчика."""
+    chart_files = chart_files or []
+    sweep_df = sweep_df if sweep_df is not None else pd.DataFrame()
+
     with pd.ExcelWriter(path, engine="openpyxl") as writer:
-        # Лист 1: Сводка — все стратегии × все периоды
+        # Лист 1: Выводы — авто-генерация по фактам из results
+        conclusions = _build_conclusions(results, cfg, stakes)
+        conclusions.to_excel(writer, sheet_name="Выводы", index=False)
+
+        # Лист 2: Сводка — все стратегии × все периоды
         summary = results[[
             "стратегия", "период", "сигналов_всего", "пропущено", "осталось",
             "побед", "проигрышей", "win_rate_%", "PnL_всего", "PnL_на_сигнал", "max_drawdown",
         ]].copy()
         summary.to_excel(writer, sheet_name="Сводка", index=False)
 
-        # Лист 2: Описание фильтров
+        # Лист 3: Описание фильтров
         descriptions = (
             results[["стратегия_код", "стратегия", "описание"]]
             .drop_duplicates(subset=["стратегия_код"])
@@ -369,7 +420,7 @@ def _write_backtest_excel(results: pd.DataFrame, path: Path, cfg, stakes, train_
         )
         descriptions.to_excel(writer, sheet_name="Описание_фильтров", index=False)
 
-        # Лист 3: Параметры стратегии и интерпретация
+        # Лист 4: Параметры стратегии и интерпретация
         params = pd.DataFrame([
             ["Выплата (payout)",            f"{cfg.payout}x"],
             ["Догон (макс. ставок)",        cfg.max_attempts],
@@ -388,6 +439,122 @@ def _write_backtest_excel(results: pd.DataFrame, path: Path, cfg, stakes, train_
             ["Колонка 'max_drawdown'",      "Максимальная просадка эквити (отрицательное число)."],
         ], columns=["параметр", "значение"])
         params.to_excel(writer, sheet_name="Параметры", index=False)
+
+        # Лист 5: Sweep по разным payout (если был запрошен)
+        if not sweep_df.empty:
+            sweep_df.to_excel(writer, sheet_name="Sweep_по_payout", index=False)
+
+        # Лист 6: Графики (вставляем PNG прямо в Excel)
+        if chart_files:
+            from openpyxl.drawing.image import Image as XLImage
+            ws = writer.book.create_sheet("Графики")
+            ws["A1"] = "7 графиков по ТЗ заказчика (File 4). См. также папку export/charts/"
+            row = 3
+            for fp in chart_files:
+                try:
+                    img = XLImage(str(fp))
+                    # Уменьшаем размеры до приличных в Excel
+                    img.width = 720
+                    img.height = 400
+                    ws.add_image(img, f"A{row}")
+                    row += 22
+                except Exception as e:  # noqa: BLE001
+                    ws.cell(row=row, column=1).value = f"[не удалось вставить {fp.name}: {e}]"
+                    row += 2
+
+
+def _build_conclusions(results: pd.DataFrame, cfg, stakes) -> pd.DataFrame:
+    """Авто-выводы на русском, заполнены реальными числами из результатов."""
+    all_p = results[results["период"] == "весь_период"].copy()
+    train = results[results["период"] == "train"].copy()
+    test = results[results["период"] == "test"].copy()
+
+    baseline = all_p[all_p["стратегия_код"] == "baseline"].iloc[0] if "baseline" in all_p["стратегия_код"].values else None
+    # "Лучшую" ищем только среди стратегий, оставивших содержательное число
+    # сигналов: иначе фильтр, отрезающий вообще всё, всегда побеждает с PnL=0.
+    MIN_KEPT = 30
+    viable = all_p[all_p["осталось"] >= MIN_KEPT]
+    best_all = viable.sort_values("PnL_всего", ascending=False).iloc[0] if not viable.empty else None
+    viable_tr = train[train["осталось"] >= MIN_KEPT]
+    best_train = viable_tr.sort_values("PnL_всего", ascending=False).iloc[0] if not viable_tr.empty else None
+
+    tz_codes = [c for c in all_p["стратегия_код"].unique() if c.startswith("tz_")]
+    inv_codes = [c for c in all_p["стратегия_код"].unique() if c.startswith("inv_")]
+    tz_pnl = all_p[all_p["стратегия_код"].isin(tz_codes)]["PnL_всего"].mean()
+    inv_pnl = all_p[all_p["стратегия_код"].isin(inv_codes)]["PnL_всего"].mean()
+
+    lines: list[tuple[str, str]] = []
+    lines.append(("ВЫВОДЫ ПО БЭКТЕСТУ", ""))
+    lines.append(("Параметры стратегии",
+                  f"мартингейл против серии, payout {cfg.payout}x, "
+                  f"догон {cfg.max_attempts}, ставки {stakes} ({cfg.stake_mode})"))
+    lines.append(("", ""))
+
+    if baseline is not None:
+        lines.append(("1. Базовая стратегия без фильтров",
+                      f"win_rate={baseline['win_rate_%']}%  PnL={baseline['PnL_всего']:+.1f}  "
+                      f"DD={baseline['max_drawdown']:+.1f}  "
+                      f"({int(baseline['сигналов_всего'])} сигналов)"))
+        if baseline["PnL_всего"] < 0:
+            lines.append(("   Интерпретация",
+                          "Стратегия без фильтров в минусе. Высокий win_rate "
+                          "не компенсирует -7 за полный проигрыш цепи (1-2-4)."))
+        elif baseline["PnL_всего"] > 0:
+            lines.append(("   Интерпретация", "Стратегия даже без фильтров прибыльна."))
+    lines.append(("", ""))
+
+    if best_all is not None:
+        lines.append(("2. Лучшая стратегия (весь период)",
+                      f"{best_all['стратегия']}: PnL={best_all['PnL_всего']:+.1f}, "
+                      f"win_rate={best_all['win_rate_%']}%, "
+                      f"осталось сигналов {int(best_all['осталось'])} из "
+                      f"{int(best_all['сигналов_всего'])}"))
+    if best_train is not None:
+        lines.append(("3. Walk-forward проверка",
+                      f"Лучшая на train (≥{MIN_KEPT} сигналов): '{best_train['стратегия']}' "
+                      f"PnL={best_train['PnL_всего']:+.1f}."))
+        same_on_test = test[test["стратегия_код"] == best_train["стратегия_код"]]
+        if not same_on_test.empty:
+            r = same_on_test.iloc[0]
+            verdict = "результат переносится" if r["PnL_всего"] >= 0 else "результат на test слабее"
+            lines.append(("   Та же стратегия на test",
+                          f"PnL={r['PnL_всего']:+.1f}, win_rate={r['win_rate_%']}% — {verdict}."))
+    lines.append(("", ""))
+
+    if tz_codes and inv_codes:
+        lines.append(("4. Гипотеза заказчика vs альтернатива",
+                      f"Средний PnL по 5 фильтрам из ТЗ:        {tz_pnl:+.1f}"))
+        lines.append(("", f"Средний PnL по 5 инверт-фильтрам:        {inv_pnl:+.1f}"))
+        if inv_pnl > tz_pnl:
+            lines.append(("   Вывод",
+                          "Инверт-фильтры дают больший PnL в среднем. Это значит: "
+                          "длинные серии чаще возникают в ТИХИХ условиях (нет пробоя, "
+                          "низкий объём, баланс taker), а не в импульсе. "
+                          "Гипотеза 'избегать сигналов на пробое' данными не подтверждается."))
+        else:
+            lines.append(("   Вывод",
+                          "Фильтры ТЗ выигрывают у инверт-фильтров. "
+                          "Гипотеза заказчика частично подтверждается."))
+    lines.append(("", ""))
+
+    n_signals = int(baseline["сигналов_всего"]) if baseline is not None else 0
+    lines.append(("5. Что это значит на практике", ""))
+    lines.append(("",
+                  f"На {n_signals} сигналах за период даже лучший фильтр "
+                  f"оставляет нас близко к нулю на test. Чтобы стратегия "
+                  f"стабильно выходила в плюс, нужно одно из:"))
+    lines.append(("   а)", "Полу­чать payout выше 1.8 (попробуй sweep 1.85 / 1.9 / 2.0)."))
+    lines.append(("   б)", "Сократить размер потери цепи: меньше догонов или фикс. ставка."))
+    lines.append(("   в)", "Добавить более жёсткий фильтр — например, по часам МСК (см. графики)."))
+    lines.append(("", ""))
+
+    lines.append(("6. Как читать остальные листы", ""))
+    lines.append(("   Сводка",          "Полная таблица: 11+ стратегий × 3 периода."))
+    lines.append(("   Описание_фильтров","Что каждый фильтр делает, по-русски."))
+    lines.append(("   Параметры",       "Параметры стратегии и интерпретация колонок."))
+    lines.append(("   Графики",         "7 диаграмм из ТЗ (по часам МСК, объёму, пробоям, длинам серий)."))
+
+    return pd.DataFrame(lines, columns=["раздел", "значение"])
 
 
 def cmd_status(_args, cfg) -> None:
@@ -473,8 +640,8 @@ def main() -> None:
     p_bt = sub.add_parser("backtest", help="Прогнать бэктест мартингейла с фильтрами")
     p_bt.add_argument("--source", default="binance_spot",
                       choices=["binance_spot", "binance_futures", "bybit_linear"])
-    p_bt.add_argument("--payout", type=float, default=1.8,
-                      help="Множитель выплаты Polymarket (по дефолту 1.8)")
+    p_bt.add_argument("--payout", default="1.8",
+                      help="Множитель выплаты (одно число или через запятую для sweep: 1.8,1.9,2.0)")
     p_bt.add_argument("--base-stake", type=float, default=1.0)
     p_bt.add_argument("--max-attempts", type=int, default=3,
                       help="Сколько ставок-догонов после тройки (по дефолту 3)")

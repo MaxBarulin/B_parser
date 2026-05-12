@@ -165,6 +165,10 @@ def add_features(signals: pd.DataFrame, klines: pd.DataFrame) -> pd.DataFrame:
     out["fwd_return_15m_pct"] = np.where(third_close > 0, (fwd15 / third_close - 1.0) * 100.0, np.nan)
     out["fwd_return_60m_pct"] = np.where(third_close > 0, (fwd60 / third_close - 1.0) * 100.0, np.nan)
 
+    # --- Moscow hour of signal entry (for hour-of-day filters / charts) ---
+    sig_t = pd.DatetimeIndex(out["signal_open_time"], tz="UTC")
+    out["hour_msk"] = sig_t.tz_convert("Europe/Moscow").hour.astype("Int64")
+
     return out
 
 

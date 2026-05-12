@@ -218,7 +218,7 @@ def _do_backtest(cfg: dict) -> None:
     ])
     if src is None:
         return
-    payout_s = _ask("Множитель выплаты Polymarket (например 1.8)", "1.8")
+    payout_s = _ask("Выплата Polymarket (одно число 1.8 или несколько через запятую: 1.8,1.9,2.0)", "1.8")
     stake_s = _ask("Базовая ставка (например 1)", "1")
     attempts = _ask_int("Сколько ставок-догонов после тройки", 3)
     mode = _menu("Режим ставок", [
@@ -231,7 +231,7 @@ def _do_backtest(cfg: dict) -> None:
     out = _ask("Папка для xlsx-отчёта", "export")
     args = type("A", (), {
         "source": src,
-        "payout": float(payout_s),
+        "payout": payout_s,  # строка; cmd_backtest распарсит по запятой
         "base_stake": float(stake_s),
         "max_attempts": attempts,
         "stake_mode": mode,
