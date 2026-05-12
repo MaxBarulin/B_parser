@@ -150,10 +150,11 @@ def _concat_aggtrades(cache_dir: str, symbol: str) -> pd.DataFrame | None:
 
 
 def _write_excel(df: pd.DataFrame, path: Path) -> None:
-    """Excel cannot store tz-aware timestamps; strip tz (data is UTC, document it)."""
+    """Excel can't store tz-aware timestamps; strip the tz but keep each
+    column's LOCAL clock time (UTC stays UTC, Moscow stays Moscow)."""
     df = df.copy()
     for col in df.select_dtypes(include=["datetimetz"]).columns:
-        df[col] = df[col].dt.tz_convert("UTC").dt.tz_localize(None)
+        df[col] = df[col].dt.tz_localize(None)
     df.to_excel(path, index=False, engine="openpyxl")
 
 
